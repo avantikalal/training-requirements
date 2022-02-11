@@ -1,0 +1,155 @@
+---
+title: "ChIP-seq analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Download Files
+
+The two ENCODE ChIP-seq datasets chosen were: 
+
+1. ENCSR000EUM; YY1 ChIP-seq in human GM12878 cells
+2. ENCSR000ARD; EZH2 ChIP-seq in human GM12878 cells
+
+ENCODE4 IDR thresholded peaks in bed narrowpeak format based on hg38 mapping were downloaded for both.
+
+```{r}
+#download.file('https://www.encodeproject.org/files/ENCFF258UEW/@@download/ENCFF258UEW.bed.gz',
+#              'ENCFF258UEW.bed.gz') #YY1
+#download.file('https://www.encodeproject.org/files/ENCFF339YTO/@@download/ENCFF339YTO.bed.gz',
+#              'ENCFF339YTO.bed.gz') # EZH2
+```
+
+## Read datasets
+
+We use the `toGRanges` function in the `ChIPpeakAnno` library to read both sets of peaks to GRanges objects.
+
+```{r}
+library(ChIPpeakAnno)
+
+yy1 <- toGRanges('ENCFF258UEW.bed.gz', format="narrowPeak")
+ezh2 <- toGRanges('ENCFF339YTO.bed.gz', format="narrowPeak")
+
+cat("Number of peaks for YY1: ", length(yy1))
+cat("Number of peaks for EZH2: ", length(ezh2))
+```
+
+## Peak overlap
+
+We use more functions from the `ChIPpeakAnno` library to make a venn diagram comparing the overlap of binding sites for the two ChIP-Seq datasets.
+
+```{r}
+ovl <- findOverlapsOfPeaks(yy1, ezh2)
+makeVennDiagram(ovl,
+                fill=c("#009E73", "#F0E442"), # circle fill color
+                col=c("#D55E00", "#0072B2"), #circle border color
+                cat.col=c("#D55E00", "#0072B2"),
+                plot=TRUE)
+```
+
+## TSS metaplot
+
+To make a metaplot of the two datasets around the TSS, we can use TSS locations annotated for hg38 as well as the `ChIPseeker` library.
+
+```{r}
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+promoter <- getPromoters(TxDb=txdb, upstream=3000, downstream=3000)
+tagMatrixList <- lapply(list(YY1=yy1, EZH2=ezh2), getTagMatrix, windows=promoter)
+plotAvgProf(tagMatrixList, xlim=c(-3000, 3000),
+            xlab="Genomic Region (5'->3')", ylab = "Read Count Frequency")
+
+```
+
+## Peak annotation
+
+We annotate the peaks for genomic features such as intron, exon, 3’UTR, etc and compare the annotations between the two datasets. To compare the two annotations, we can areate a stacked barplot representing the fraction of peaks in each dataset with different annotations. This shows that YY1 has more intronic binding sites than EZH2.
+
+```{r}
+library(org.Hs.eg.db)
+library(ggplot2)
+
+# Annotate peaks
+yy1Anno <- annotatePeak(yy1, tssRegion=c(-3000, 3000), TxDb=txdb, annoDb="org.Hs.eg.db")
+ezh2Anno <- annotatePeak(ezh2, tssRegion=c(-3000, 3000), TxDb=txdb, annoDb="org.Hs.eg.db")
+
+# Combine annotations from both datasets into a single dataframe
+df = rbind(
+  data.frame(Annotation=as.data.frame(yy1Anno)$annotation, Experiment="YY1"),
+  data.frame(Annotation=as.data.frame(ezh2Anno)$annotation, Experiment="EZH2")
+  )
+
+# The intron annotation returned by annotatePeak contains details about the introns and exons that we can drop for plotting.
+df[startsWith(df$Annotation, 'Intron'), "Annotation"] = "Intron"
+df[startsWith(df$Annotation, 'Exon'), "Annotation"] = "Exon"
+
+# make stacked barplot
+ggplot(df, aes(x=Experiment, fill = Annotation)) + 
+  geom_bar(position="fill", stat = "count") +
+  ylab('Fraction of peaks')
+
+```
+
+## Pathway enrichment
+
+With peaks assigned to genes, we can perform pathway enrichment. Here we use Reactome and KEGG pathways. We can plot the enrichment of the top enriched pathways in each dataset.
+
+```{r}
+library(ReactomePA)
+library(clusterProfiler)
+
+yy1Path <- enrichPathway(as.data.frame(yy1Anno)$geneId)
+ezh2Path <- enrichPathway(as.data.frame(ezh2Anno)$geneId)
+
+sum(yy1Path$p.adjust < .05)
+sum(ezh2Path$p.adjust < .05)
+
+dotplot(yy1Path)
+dotplot(ezh2Path)
+
+yy1KEGG <- enrichKEGG(as.data.frame(yy1Anno)$geneId)
+ezh2KEGG <- enrichKEGG(as.data.frame(ezh2Anno)$geneId)
+
+sum(yy1KEGG$p.adjust < .05)
+sum(ezh2KEGG$p.adjust < .05)
+
+dotplot(ezh2KEGG, showCategory = 15, title = "KEGG Pathway Enrichment Analysis")
+```
+
+## Shared genes and pathways
+
+What genes and pathways/genesets shared between these datasets?
+
+Since 0 KEGG pathways were enriched in the YY1 set, there are no shared KEGG pathways. We can find check for shared Reactome pathways, as well as counting the number of common genes:
+
+```{r}
+
+common_pathways = intersect(ezh2Path$ID[ezh2Path$p.adjust < .05], yy1Path$ID[yy1Path$p.adjust < .05])
+print(common_pathways)
+
+print(length(unique(as.data.frame(yy1Anno)$ENSEMBL)))
+print(length(unique(as.data.frame(ezh2Anno)$ENSEMBL)))
+
+common_genes = intersect(as.data.frame(yy1Anno)$ENSEMBL, as.data.frame(ezh2Anno)$ENSEMBL)
+print(length(common_genes))
+```
+
+## Differing pathways
+
+What pathways differ? What is your interpretation of these results? 
+
+Since there were no common pathways, all pathways found in the analyses above were specific to either YY1 or EZH2.
+
+
+## Future Directions
+
+There seems to be very little overlap between the binding sites of YY1 and EZH2 under the conditions tested, and the two TFs affect distinct pathways although there are some common genes.
+
+It was interesting to see this result since there is evidence of interaction between these two TFs in Schwann cells (DOI: 10.1158/0008-5472.CAN-19-2415). It is possible that this depends upon the specific conditions. We can examine public datasets from other time points, conditions and cell types to find out whether there is evidence of an interaction between these TFs in another context. Further, we can analyze bulk and single-cell RNA-seq datasets to identify cell types and conditions in which both of these TFs, as well as any accessory factors known to be involved in their function. This can help us prioritize conditions where both TFs are expected to be active.
+
+We can also examine the sequences of the binding sites to get the binding motifs for both TFs. Are these motifs very dissimilar leading to the low peak overlap? Do these motifs tend not to occur at the same genes? Are there other TFs that bind to the same motifs? If so, that can help us identify factors that assist or compete with these TFs.
